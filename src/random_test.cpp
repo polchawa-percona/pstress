@@ -682,6 +682,8 @@ Column::COLUMN_TYPES Column::col_type(std::string type) {
     return FLOAT;
   else if (type.compare("DOUBLE") == 0)
     return DOUBLE;
+  else if (type.compare("VECTOR") == 0)
+    return VECTOR;
   else
     throw std::runtime_error("unhandled " + col_type_to_string(type_) +
                              " at line " + std::to_string(__LINE__));
@@ -708,6 +710,8 @@ const std::string Column::col_type_to_string(COLUMN_TYPES type) {
     return "BLOB";
   case GENERATED:
     return "GENERATED";
+  case VECTOR:
+    return "VECTOR";
   case COLUMN_MAX:
     break;
   }
@@ -752,6 +756,7 @@ static std::string rand_value_universal(Column::COLUMN_TYPES type_,
     return "\'" + rand_string(rand_length) + "\'";
     break;
   case Column::COLUMN_TYPES::GENERATED:
+  case Column::COLUMN_TYPES::VECTOR:
   case Column::COLUMN_TYPES::COLUMN_MAX:
     throw std::runtime_error("unhandled " + Column::col_type_to_string(type_) +
                              " at line " + std::to_string(__LINE__));
@@ -765,6 +770,121 @@ std::string Column::rand_value() { return rand_value_universal(type_, length); }
 /* return random value of sub string */
 std::string Generated_Column::rand_value() {
   return rand_value_universal(g_type, length);
+}
+
+/* range of vector components */
+static const float g_vector_range = 100;
+/* number of vectors in the duplicate pool and of cluster centres */
+static const int g_vector_pool_size = 8;
+static const int g_vector_clusters = 4;
+
+/* new vector column, random dimension */
+Vector_Column::Vector_Column(std::string name, Table *table)
+    : Column(name, table, Column::VECTOR) {
+  int max_dim = options->at(Option::VECTOR_MAX_DIM)->getInt();
+  dim = rand_int(max_dim < 1 ? 1 : max_dim, 1);
+  null = true; // NOT NULL, required by the HNSW index
+}
+
+/* constructor used by load_metadata */
+Vector_Column::Vector_Column(std::string name, Table *table, int dim_)
+    : Column(table, Column::VECTOR), dim(dim_) {
+  name_ = name;
+}
+
+std::vector<float> Vector_Column::rand_vector(int dimensions) const {
+  std::uniform_real_distribution<float> dis(-g_vector_range, g_vector_range);
+  std::vector<float> values(dimensions);
+  for (auto &v : values)
+    v = dis(rng);
+  return values;
+}
+
+std::vector<float> Vector_Column::seeded_vector(int n) const {
+  std::mt19937 gen(n + 1);
+  std::uniform_real_distribution<float> dis(-g_vector_range, g_vector_range);
+  std::vector<float> values(dim);
+  for (auto &v : values)
+    v = dis(gen);
+  return values;
+}
+
+std::string Vector_Column::to_literal(const std::vector<float> &values) {
+  std::ostringstream out;
+  out << std::setprecision(6);
+  out << (rand_int(9) == 0 ? "TO_VECTOR('[" : "STRING_TO_VECTOR('[");
+  for (size_t i = 0; i < values.size(); i++) {
+    if (i > 0)
+      out << ",";
+    out << values[i];
+  }
+  out << "]')";
+  return out.str();
+}
+
+bool Vector_Column::parse(const std::string &text,
+                          std::vector<float> &values) {
+  values.clear();
+  auto begin = text.find('[');
+  auto end = text.rfind(']');
+  if (begin == std::string::npos || end == std::string::npos || end <= begin)
+    return false;
+  std::stringstream ss(text.substr(begin + 1, end - begin - 1));
+  std::string item;
+  while (std::getline(ss, item, ',')) {
+    char *rest = nullptr;
+    float v = std::strtof(item.c_str(), &rest);
+    if (rest == item.c_str())
+      return false;
+    values.push_back(v);
+  }
+  return values.size() > 0;
+}
+
+std::string Vector_Column::literal_with_noise(const std::string &text,
+                                              float noise) {
+  std::vector<float> values;
+  if (!parse(text, values))
+    return uniform_vector_literal();
+  std::uniform_real_distribution<float> dis(-noise, noise);
+  for (auto &v : values)
+    v += dis(rng);
+  return to_literal(values);
+}
+
+std::string Vector_Column::uniform_vector_literal() {
+  return to_literal(rand_vector(dim));
+}
+
+std::string Vector_Column::zero_vector_literal() {
+  return to_literal(std::vector<float>(dim, 0));
+}
+
+std::string Vector_Column::rand_vector_literal() {
+  auto prob = rand_int(99);
+  if (prob < 50)
+    return uniform_vector_literal();
+  if (prob < 65)
+    return to_literal(seeded_vector(rand_int(g_vector_pool_size - 1)));
+  if (prob < 68)
+    return zero_vector_literal();
+  /* cluster: centre plus noise */
+  auto values = seeded_vector(g_vector_pool_size +
+                              rand_int(g_vector_clusters - 1));
+  std::uniform_real_distribution<float> dis(-1, 1);
+  for (auto &v : values)
+    v += dis(rng);
+  return to_literal(values);
+}
+
+std::string Vector_Column::rand_value() {
+  if (table_->hnsw_index() != nullptr && rand_int(99) == 0) {
+    /* wrong dimension: a vector with fewer dimensions is refused by the
+     * index, a longer one by the column */
+    int wrong_dim = dim > 1 ? rand_int(dim - 1, 1) : 2;
+    return to_literal(rand_vector(wrong_dim));
+  }
+  return rand_vector_literal();
 }
 
 /* prepare single quoted string for LIKE clause */
@@ -825,6 +945,9 @@ Column::Column(std::string name, Table *table, COLUMN_TYPES type)
   case BOOL:
     name_ = "t" + name;
     break;
+  case VECTOR:
+    name_ = "e" + name;
+    break;
   default:
     throw std::runtime_error("unhandled " + col_type_to_string(type_) +
                              " at line " + std::to_string(__LINE__));
@@ -877,6 +1000,14 @@ Generated_Column::Generated_Column(std::string name, Table *table,
   g_type = Column::col_type(sub_type);
 }
 
+bool Generated_Column::has_base_column(const Table *table) {
+  for (auto col : *table->columns_) {
+    if (!col->auto_increment && col->type_ != GENERATED && col->type_ != VECTOR)
+      return true;
+  }
+  return false;
+}
+
 /* Generated column constructor. lock table before calling */
 Generated_Column::Generated_Column(std::string name, Table *table)
     : Column(table, Column::GENERATED) {
@@ -908,7 +1039,8 @@ Generated_Column::Generated_Column(std::string name, Table *table)
   while (col_pos.size() < columns) {
     size_t col = rand_int(table->columns_->size() - 1);
     if (!table->columns_->at(col)->auto_increment &&
-        table->columns_->at(col)->type_ != GENERATED)
+        table->columns_->at(col)->type_ != GENERATED &&
+        table->columns_->at(col)->type_ != VECTOR)
       col_pos.push_back(col);
   }
 
@@ -957,6 +1089,7 @@ Generated_Column::Generated_Column(std::string name, Table *table)
         break;
       case COLUMN_MAX:
       case GENERATED:
+      case VECTOR:
         throw std::runtime_error("unhandled " + col_type_to_string(col->type_) +
                                  " at line " + std::to_string(__LINE__));
       }
@@ -1003,6 +1136,14 @@ template <typename Writer> void Column::Serialize(Writer &writer) const {
   writer.Bool(auto_increment);
   writer.String("lenght");
   writer.Int(length);
+  writer.String("unsigned_big");
+  writer.Bool(unsigned_big);
+}
+
+/* add dimension in metadata */
+template <typename Writer> void Vector_Column::Serialize(Writer &writer) const {
+  writer.String("dim");
+  writer.Int(dim);
 }
 
 /* add sub_type metadata */
@@ -1148,6 +1289,8 @@ template <typename Writer> void Table::Serialize(Writer &writer) const {
       static_cast<Generated_Column *>(col)->Serialize(writer);
     } else if (col->type_ == Column::BLOB) {
       static_cast<Blob_Column *>(col)->Serialize(writer);
+    } else if (col->type_ == Column::VECTOR) {
+      static_cast<Vector_Column *>(col)->Serialize(writer);
     }
     writer.EndObject();
   }
@@ -1679,7 +1822,8 @@ void Table::CreateDefaultColumn() {
 
         /* intial columns can't be generated columns. also 50% of tables last
          * columns are virtuals */
-        if (!no_virtual_col && i >= .8 * max_columns && rand_int(1) == 1)
+        if (!no_virtual_col && i >= .8 * max_columns && rand_int(1) == 1 &&
+            Generated_Column::has_base_column(this))
           col_type = Column::GENERATED;
         else if (prob < 5)
           col_type = Column::INT;
@@ -1746,15 +1890,16 @@ void Table::CreateDefaultIndex() {
 
     static size_t max_columns = opt_int(INDEX_COLUMNS);
 
+    /* compressed and vector columns can't be in a regular index */
     int number_of_compressed = 0;
 
     for (auto column : *columns_)
-      if (column->compressed)
+      if (column->compressed || column->type_ == Column::VECTOR)
         number_of_compressed++;
 
     size_t number_of_columns = columns_->size() - number_of_compressed;
 
-    /* only compressed columns */
+    /* only compressed or vector columns */
     if (number_of_columns == 0)
       return;
 
@@ -1766,7 +1911,8 @@ void Table::CreateDefaultIndex() {
     /* pick some columns */
     while (col_pos.size() < number_of_columns) {
       int current = rand_int(columns_->size() - 1);
-      if (columns_->at(current)->compressed)
+      if (columns_->at(current)->compressed ||
+          columns_->at(current)->type_ == Column::VECTOR)
         continue;
       /* auto-inc column should be first column in auto_inc_index */
       if (auto_inc_pos != -1 && i == auto_inc_index && col_pos.size() == 0)
@@ -1909,6 +2055,9 @@ bool Table::has_pk() const {
   }
   return false;
 }
+
+/* no HNSW index model yet */
+Index *Table::hnsw_index() const { return nullptr; }
 
 /* prepare table definition */
 std::string Table::definition(bool with_index) {
@@ -2241,6 +2390,7 @@ void Table::ModifyColumn(Thd1 *thd) {
     case Column::DOUBLE:
     case Column::INT:
     case Column::INTEGER:
+    case Column::VECTOR:
       col = col1;
       length = col->length;
       auto_increment = col->auto_increment;
@@ -2368,7 +2518,8 @@ void Table::AddColumn(Thd1 *thd) {
   table_mutex.lock();
 
   if (no_use_virtual ||
-      (columns_->size() == 1 && columns_->at(0)->auto_increment == true))
+      (columns_->size() == 1 && columns_->at(0)->auto_increment == true) ||
+      !Generated_Column::has_base_column(this))
     use_virtual = false;
 
   while (col_type == Column::COLUMN_MAX) {
@@ -2486,15 +2637,29 @@ void Table::AddIndex(Thd1 *thd) {
   static size_t max_columns = opt_int(INDEX_COLUMNS);
   table_mutex.lock();
 
+  /* vector columns can't be in a regular index */
+  size_t index_columns = 0;
+  for (auto col : *columns_)
+    if (col->type_ != Column::VECTOR)
+      index_columns++;
+
+  if (index_columns == 0) {
+    table_mutex.unlock();
+    delete id;
+    return;
+  }
+
   /* number of columns to be added */
   int no_of_columns = rand_int(
-      (max_columns < columns_->size() ? max_columns : columns_->size()), 1);
+      (max_columns < index_columns ? max_columns : index_columns), 1);
 
   std::vector<int> col_pos; // position of columns
 
   /* pick some columns */
   while (col_pos.size() < (size_t)no_of_columns) {
     int current = rand_int(columns_->size() - 1);
+    if (columns_->at(current)->type_ == Column::VECTOR)
+      continue;
     /* auto-inc column should be first column in auto_inc_index */
     bool already_added = false;
     for (auto id : col_pos) {
@@ -2703,6 +2868,8 @@ void Table::DeleteRandomRow(Thd1 *thd) {
         if (rand_int(1000) < 10)
           where = col_pos;
         break;
+      /* a vector column is never a WHERE column */
+      case Column::VECTOR:
       case Column::COLUMN_MAX:
         break;
       }
@@ -2770,6 +2937,8 @@ void Table::SelectRandomRow(Thd1 *thd) {
       if (rand_int(1000) < 10)
         where = col_pos;
       break;
+    /* a vector column is never a WHERE column */
+    case Column::VECTOR:
     case Column::COLUMN_MAX:
       break;
     }
@@ -2850,6 +3019,8 @@ void Table::UpdateRandomROW(Thd1 *thd) {
       if (rand_int(1000) < 10)
         where = col_pos;
       break;
+    /* a vector column is never a WHERE column */
+    case Column::VECTOR:
     case Column::COLUMN_MAX:
       break;
     }
@@ -2970,6 +3141,10 @@ bool Table::InsertBulkRecord(Thd1 *thd) {
         value += std::to_string(thd->unique_keys.at(records));
       } else if (column->auto_increment == true) {
         value += "NULL";
+      } else if (column->type_ == Column::VECTOR) {
+        /* the HNSW index is added after the load, so every value must have
+         * the right dimension */
+        value += static_cast<Vector_Column *>(column)->rand_vector_literal();
       } else if (is_list_partition && column->name_.compare("ip_col") == 0) {
         /* for list partition we insert only maximum possible value
          * todo modify rand_value to return list parititon range */
@@ -3491,6 +3666,9 @@ static std::string load_metadata_from_file() {
       } else if (type.compare("BLOB") == 0) {
         auto sub_type = col["sub_type"].GetString();
         a = new Blob_Column(col["name"].GetString(), table, sub_type);
+      } else if (type.compare("VECTOR") == 0) {
+        a = new Vector_Column(col["name"].GetString(), table,
+                              col["dim"].GetInt());
       } else
         throw std::runtime_error("unhandled column type");
 
@@ -3499,6 +3677,7 @@ static std::string load_metadata_from_file() {
       a->length = col["lenght"].GetInt(),
       a->primary_key = col["primary_key"].GetBool();
       a->compressed = col["compressed"].GetBool();
+      a->unsigned_big = col["unsigned_big"].GetBool();
       table->AddInternalColumn(a);
     }
 
