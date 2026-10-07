@@ -173,6 +173,32 @@ nohup ./pstress-run.sh pstress-run.conf 2>&1 &
 Check run logs through tail -f nohup.out
 
 
+# Vector index (HNSW) testing
+
+pstress can test the InnoDB HNSW vector index and approximate nearest neighbour (ANN) search of Percona Server 9.7. The options below become available once the PSTRESS-173 code changes land; a pstress binary without them rejects the options and exits.
+
+At startup pstress checks whether the server supports vector indexes (`innodb_hnsw_ef_search` and the `DISTANCE()` function). If it does not, vector testing is turned off with one log line, unless a vector option was given explicitly, in which case pstress exits with an error. Vector testing is also off with a non-InnoDB `--engine`, `--only-temporary`, `--only-partition` or `--no-vector`.
+
+A vector table has a `BIGINT UNSIGNED` auto-increment primary key, one `VECTOR(N) NOT NULL` column and an HNSW index (`VECTOR KEY ... TYPE hnsw`), plus the usual random columns and secondary indexes.
+
+Option | Description | Example | Default
+--- | --- | --- | ---
+--no-vector | Do not create vector tables and do not run vector actions | --no-vector | default: 0
+--vector-prob | Probability (in percent) that a table is a vector table | --vector-prob 100 | default#: 20
+--vector-max-dim | Maximum dimension of the VECTOR column (name may change) | --vector-max-dim 16 | default#: 16
+--select-vector-ann | ANN search: SELECT ... ORDER BY DISTANCE(vector column, constant, metric) LIMIT n, with varying metrics, LIMIT values, WHERE clauses, joins, subqueries, prepared statements and index hints | --select-vector-ann 800 | default#: 200
+--add-drop-vector-index | Drop the HNSW index of a vector table, or add one if the table has none | --add-drop-vector-index 10 | default#: 2
+--set-hnsw-ef-search | SET SESSION innodb_hnsw_ef_search to a random value | --set-hnsw-ef-search 20 | default#: 5
+
+The server variables `innodb_hnsw_max_memory` and `innodb_hnsw_ef_search` can be changed during the load with `--mso`, for example `--mso=10:innodb_hnsw_max_memory=0=1048576=67108864 --mso=20:innodb_hnsw_ef_search=1=40=1000`.
+
+The configuration file `pstress/pstress-run-vector.conf` runs a vector-only load: every table is a vector table, ANN searches dominate the mix, the HNSW variables above are changed during the load, and the server is killed with SIGKILL between trials so that each trial starts with crash recovery of the vector indexes. Set `BASEDIR` to a Percona Server 9.7 build with vector index support and run:
+
+```bash
+cd pstress/pstress
+nohup ./pstress-run.sh pstress-run-vector.conf 2>&1 &
+```
+
 # Contributors
 * Alexey Bychko - C++ code, cmake extensions
 * Roel Van de Paar - invention, scripted framework
