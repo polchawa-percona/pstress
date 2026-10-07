@@ -286,6 +286,19 @@ void add_options() {
   opt->help = "Maximum number of dimensions of a VECTOR column";
   opt->setInt(16);
 
+  /* ANN search on vector tables */
+  opt = newOption(Option::INT, Option::SELECT_VECTOR_ANN, "select-vector-ann");
+  opt->help = "ANN search (ORDER BY DISTANCE() LIMIT k) on a vector table";
+  opt->setInt(200);
+  opt->setSQL();
+
+  /* HNSW search width */
+  opt = newOption(Option::INT, Option::SET_HNSW_EF_SEARCH,
+                  "set-hnsw-ef-search");
+  opt->help = "Set the session innodb_hnsw_ef_search";
+  opt->setInt(5);
+  opt->setSQL();
+
   /* Initial Records in table */
   opt = newOption(Option::INT, Option::INITIAL_RECORDS_IN_TABLE, "records");
   opt->help =
