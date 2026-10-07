@@ -147,6 +147,9 @@ struct Option {
     FK_PROB,
     PARTITION_PROB,
     TEMPORARY_PROB,
+    NO_VECTOR,
+    VECTOR_PROB,
+    VECTOR_MAX_DIM,
     MAX
   } option;
   Option(Type t, Opt o, std::string n)
