@@ -150,6 +150,7 @@ struct Option {
     NO_VECTOR,
     VECTOR_PROB,
     VECTOR_MAX_DIM,
+    ADD_DROP_VECTOR_INDEX,
     MAX
   } option;
   Option(Type t, Opt o, std::string n)

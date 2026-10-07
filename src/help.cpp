@@ -286,6 +286,17 @@ void add_options() {
   opt->help = "Maximum number of dimensions of a VECTOR column";
   opt->setInt(16);
 
+  /* Add or drop the HNSW index of a vector table */
+  opt = newOption(Option::INT, Option::ADD_DROP_VECTOR_INDEX,
+                  "add-drop-vector-index");
+  opt->help = R"(
+    Drop the HNSW index of a random vector table, or add one if the table has
+    none, with ALTER TABLE ... ADD|DROP or CREATE VECTOR INDEX / DROP INDEX.
+  )";
+  opt->setInt(2);
+  opt->setSQL();
+  opt->setDDL();
+
   /* Initial Records in table */
   opt = newOption(Option::INT, Option::INITIAL_RECORDS_IN_TABLE, "records");
   opt->help =

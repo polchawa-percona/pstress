@@ -201,6 +201,9 @@ struct Index {
   ~Index();
 
   std::string definition();
+  /* " TYPE|USING hnsw [(M = m, metric = x)]" part of an HNSW index
+   * definition, shared by the inline and the CREATE VECTOR INDEX forms */
+  std::string hnsw_type_clause();
   static const std::string kind_to_string(KIND kind);
   static KIND string_to_kind(const std::string &str);
 
@@ -531,6 +534,14 @@ struct Vector_table : Table {
    * options, not added to the table. nullptr if there is no vector column.
    * Caller holds table_mutex */
   Index *new_hnsw_index(const std::string &name) const;
+
+  /* drop the HNSW index if the table has one, else add one. A nullable vector
+   * column is made NOT NULL in the same ALTER TABLE */
+  void AddDropHnswIndex(Thd1 *thd);
+  /* MODIFY COLUMN of the vector column, called by ModifyColumn(). Changes
+   * the dimension at a low rate and toggles NULL / NOT NULL while the table
+   * has no HNSW index */
+  void ModifyVectorColumn(Thd1 *thd);
 };
 
 /* vector tables of the run, cached after the metadata is created or loaded.
